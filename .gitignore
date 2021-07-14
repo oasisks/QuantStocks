@@ -127,3 +127,16 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Pycharm
+.idea/shelf/
+.idea/workspace.xml
+
+# Data things
+Exchanges/AMEX/*
+Exchanges/NYSE/*
+Exchanges/NASDAQ/*
+
+!Exchanges/AMEX/.gitkeep
+!Exchanges/NYSE/.gitkeep
+!Exchanges/NASDAQ/.gitkeep
