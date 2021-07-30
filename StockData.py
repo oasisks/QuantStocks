@@ -25,18 +25,17 @@ class Universe:
     URL: https://api.nasdaq.com/api/quote/ABCM/chart?assetclass=stocks&fromdate=2021-07-01&todate=2021-07-28
     """
 
-    def __init__(self, strategies: list, exchanges: list = ("NYSE", "NASDAQ"), period="60d", interval="15m",
+    def __init__(self, strategies: list, exchanges: list = ("NYSE", "NASDAQ", "AMEX"), period="60d", interval="15m",
                  min_volume=100000, set_industry="", set_sector="Miscellaneous",
                  set_country="United States", min_market_cap=1000000):
         """
-
         :param strategies: a list of strategies (the strategies must inherent the strategy class)
         :param exchanges: can be NYSE, NASDAQ, or AMEX
         :param period: 60d is the maximum
         :param interval: 5m, 10m, 15m, 30m, 45m, 1h, 1d, and so on
         :param min_volume: the minimum volume (float)
-        :param set_industry: the industry the ticker is in
-        :param set_sector: the sector the ticker is in
+        :param set_industry: the industry the ticker is in (please look below for a list)
+        :param set_sector: the sector the ticker is in (please look below for a list)
         :param set_country: the country the screener is interested in (please look below for a list)
         :param min_market_cap: the minimum market cap
         """
@@ -54,9 +53,9 @@ class Universe:
         self._min_market_cap = min_market_cap
 
         # we will also be generating all of the dataframes for each ticker
+        self.screener = self.__generate_screener()
         self.exchange_dfs = self.__generate_dataframes()
         self.win_rate = []
-        self.screener = self.__generate_screener()
 
     def __generate_screener(self) -> pd.DataFrame:
         """
@@ -66,12 +65,15 @@ class Universe:
         :param set_sector: the sector that we are interested in screening
         :param set_country: the country that the stock was founded in
         :return: a dict of tickers that meets all of the criteria
+        TODO: when screening for stocks, incorporate short interest as part of the parameters
+        URL: https://www.marketwatch.com/tools/screener/short-interest
         """
 
         # requests
         url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=25&offset=0&download=true"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36'}
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/92.0.4515.107 Safari/537.36'}
         request = requests.get(url, headers=headers)
         ticker_data = json.loads(request.text)["data"]["rows"]
 
@@ -89,14 +91,15 @@ class Universe:
         target_ticker = df[(df["volume"] >= self._min_volume) & (df["industry"] == self._set_industry)
                            & (df["marketCap"] >= self._min_market_cap) & (df["country"] == self._set_country)
                            & (df["industry"] == self._set_industry)]
-        return target_ticker
+        return target_ticker.reset_index(drop=True)
 
-    def __generate_dataframes(self) -> dict:
+    def __generate_dataframes(self) -> pd.DataFrame:
         """
         The dataframes are separated into folders base off intervals. Each folder (interval) will contain dataframe
         files. The interval is base off the input when Universe is initialized.
 
-        :return: returns a list of dataframes of stock data gathered from yfinance
+        :return: returns a list of dataframes of stock data gathered from yfinance. If screener is not None, then
+        the method will only incorporate tickers within the screener as part of the universe.
         """
         c_exchanges = [exchange.strip(".csv") for exchange in listdir("Exchanges") if
                        isfile(join("Exchanges", exchange))]
@@ -122,6 +125,15 @@ class Universe:
                     # we need to generate all of the dataframes and save it into that directory
                     for row in csv_reader:
                         ticker = row["Symbol"]
+
+                        # there was some problems with using the in keyword to determine whether the ticker exists in
+                        # the screener. Thus, we will be using this instead
+                        boolean_findings = self.screener.symbol.str.contains(ticker)
+                        total_occurrence = boolean_findings.sum()
+                        # if the ticker does not exist within the screener
+                        if total_occurrence == 0:
+                            continue
+
                         if "/" in ticker:
                             continue
                         df = data(ticker, self.period, self.interval)
@@ -133,6 +145,14 @@ class Universe:
                 else:
                     for row in csv_reader:
                         ticker = row["Symbol"]
+                        # there was some problems with using the in keyword to determine whether the ticker exists in
+                        # the screener. Thus, we will be using this instead
+                        boolean_findings = self.screener.symbol.str.contains(ticker)
+                        total_occurrence = boolean_findings.sum()
+                        # if the ticker does not exist within the screener
+                        if total_occurrence == 0:
+                            continue
+
                         if "/" in ticker:
                             continue
                         # if the ticker already exists within the folder we just add them
@@ -411,5 +431,6 @@ class Universe:
 if __name__ == '__main__':
     universe = Universe([VolumeIndicatorOBV], interval="5m")
     print(universe.screener)
+    print(universe.exchange_dfs)
     # universe.back_test()
     # print(universe.win_rate)
