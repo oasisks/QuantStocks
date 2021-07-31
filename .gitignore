@@ -136,7 +136,9 @@ dmypy.json
 Exchanges/AMEX/*
 Exchanges/NYSE/*
 Exchanges/NASDAQ/*
+Exchanges/Screener/*
 
 !Exchanges/AMEX/.gitkeep
 !Exchanges/NYSE/.gitkeep
 !Exchanges/NASDAQ/.gitkeep
+!Exchanges/Screener/.gitkeep

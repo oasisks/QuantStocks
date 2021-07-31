@@ -10,7 +10,6 @@ from Strategies import VolumeIndicatorOBV
 from ta.utils import dropna
 from os import listdir
 from os.path import isfile, join
-from bs4 import BeautifulSoup
 
 
 def data(ticker: str = "AAPL", period: str = "30d", interval: str = "15m"):
@@ -62,7 +61,8 @@ class Universe:
 
     def __init__(self, strategies: list, exchanges: list = ("NYSE", "NASDAQ", "AMEX"), period="60d", interval="15m",
                  min_volume=100000, set_industry="", set_sector="Miscellaneous",
-                 set_country="United States", min_market_cap=1000000, min_short_percent=0.25):
+                 set_country="United States", min_market_cap=1000000, min_short_percent=0.25,
+                 only_screener_tickers=True):
         """
         :param strategies: a list of strategies (the strategies must inherent the strategy class)
         :param exchanges: can be NYSE, NASDAQ, or AMEX
@@ -74,6 +74,7 @@ class Universe:
         :param set_country: the country the screener is interested in (please look below for a list)
         :param min_market_cap: the minimum market cap
         :param min_short_percent: the minimum percent of short interest (decimal format (0.05) or percent format (5%))
+        :param only_screener_tickers: whether to use the screener tickers only or not (bool)
         """
         # by default, the stocks within this universe will be from the NYSE and NASDAQ exchanges
         self.strategies = strategies
@@ -88,10 +89,11 @@ class Universe:
         self._set_country = set_country
         self._min_market_cap = min_market_cap
         self._min_short_percent = min_short_percent
+        self._only_screener_tickers = only_screener_tickers
 
         # we will also be generating all of the dataframes for each ticker
         self.screener = self.__generate_screener()
-        self.exchange_dfs = self.__generate_dataframes()
+        self.tickers = self.__generate_dataframes()
         self.win_rate = []
 
     def __generate_screener(self) -> pd.DataFrame:
@@ -122,7 +124,6 @@ class Universe:
 
         df["volume"] = volumes
         df["marketCap"] = market_caps
-
         # these are the tickers we are interested base off preset parameters
         target_ticker = df[(df["volume"] >= self._min_volume) & (df["industry"] == self._set_industry)
                            & (df["marketCap"] >= self._min_market_cap) & (df["country"] == self._set_country)
@@ -132,8 +133,11 @@ class Universe:
         # ['Symbol', 'Company Name', 'Price', 'Chg% (1D)', 'Chg% (YTD)', 'Short Interest', 'Short Date', 'Float', 'Float Shorted (%)']
         high_shorts = high_short_interest_tickers()
         high_shorts = high_shorts[high_shorts["Float Shorted (%)"] >= self._min_short_percent]
-        # print(high_shorts)
-        # print(target_ticker)
+
+        for high_short in high_shorts.Symbol.to_list():
+            row = df[df["symbol"] == high_short]
+            target_ticker = target_ticker.append(row, ignore_index=True)
+
         return target_ticker.reset_index(drop=True)
 
     def __generate_dataframes(self) -> dict:
@@ -146,14 +150,23 @@ class Universe:
         """
         c_exchanges = [exchange.strip(".csv") for exchange in listdir("Exchanges") if
                        isfile(join("Exchanges", exchange))]
-
         print(c_exchanges)
         # we will gather all of the ticker names from these exchanges (separated by exchanges for filtering later)
         exchange_dfs = {}
-        for exchange in self.exchanges:
-            dfs = []
 
-            if exchange in c_exchanges:
+        tickers = {}
+        if self._only_screener_tickers:
+            exchange_files = [file.strip(".pkl") for file in listdir("Exchanges/Screener")]
+            for ticker in self.screener.symbol.to_list():
+                if ticker not in exchange_files:
+                    df = data(ticker, self.period, self.interval)
+                    df.to_pickle(f"Exchanges/Screener/{ticker}.pkl")
+                    tickers[ticker] = df
+                else:
+                    df = pd.read_pickle(f"Exchanges/Screener/{ticker}.pkl")
+                    tickers[ticker] = df
+        else:
+            for exchange in c_exchanges:
                 directory = f"Exchanges/{exchange}/{self.interval}"
                 if not os.path.isdir(directory):
                     os.mkdir(directory)
@@ -169,40 +182,29 @@ class Universe:
                     for row in csv_reader:
                         ticker = row["Symbol"]
 
-                        # if the ticker does not exist within the screener
-                        if not str_exist_in_column(self.screener.symbol, ticker):
-                            # we are not interested in this ticker
-                            continue
-
                         if "/" in ticker:
                             continue
                         df = data(ticker, self.period, self.interval)
-                        print(f"Download {ticker}")
                         # save these dataframes for future uses
                         df.to_pickle(f"{directory}/{ticker}.pkl")
-                        dfs.append({ticker: df})
+                        tickers[ticker] = df
                 # if there are already dataframes that exist within the folders, we will just import those
                 else:
                     for row in csv_reader:
                         ticker = row["Symbol"]
-
-                        if not str_exist_in_column(self.screener.symbol, ticker):
-                            continue
 
                         if "/" in ticker:
                             continue
                         # if the ticker already exists within the folder we just add them
                         if ticker in exchange_files:
                             df = pd.read_pickle(f"{directory}/{ticker}.pkl")
-                            dfs.append({ticker: df})
+                            tickers[ticker] = df
                         # if it doesn't then we need to create them and save them
                         else:
                             df = data(ticker, self.period, self.interval)
-                            print(f"Download {ticker}")
                             df.to_pickle(f"{directory}/{ticker}.pkl")
-                            dfs.append({ticker: df})
-                exchange_dfs[exchange] = dfs
-        return exchange_dfs
+                            tickers[ticker] = df
+        return tickers
 
     def back_test(self):
         """
@@ -211,31 +213,23 @@ class Universe:
         :return:
         """
         index = 0
-        for exchange, dfs in self.exchange_dfs.items():
-            for df in dfs:
-                ticker = list(df.keys())[0]
-                print(ticker)
-                # print(f"The current ticker is: {ticker}")
-                df = df[ticker]
-                df = dropna(df)
-                if df.empty:
+        for ticker in self.tickers:
+            df = self.tickers[ticker]
+            df = dropna(df)
+
+            if df.empty:
+                continue
+
+            for strategy in self.strategies:
+                bt = Backtest(df, strategy, commission=0, exclusive_orders=True, cash=100000)
+                stats = bt.run()  # returns a pd.Series
+                win_rate = stats["Win Rate [%]"]
+                if math.isnan(win_rate) or win_rate == 0.0:
                     continue
-                # print(df)
-                for strategy in self.strategies:
-                    bt = Backtest(df, strategy, commission=0, exclusive_orders=True, cash=100000)
-                    stats = bt.run()  # returns a pd.Series
-                    # bt.plot()
-                    # print(f"Win rate: {stats['Win Rate [%]']}")
-                    # print(f"Finished {ticker}")
-                    win_rate = stats["Win Rate [%]"]
-                    if math.isnan(win_rate) or win_rate == 0.0:
-                        continue
-                    self.win_rate.append(win_rate)
-                    print(win_rate)
-                index += 1
-                if index == 100:
-                    break
-            break
+                self.win_rate.append(win_rate)
+            index += 1
+            if index == 100:
+                break
 
         self.win_rate = sum(self.win_rate) / len(self.win_rate)
 
@@ -468,11 +462,9 @@ class Universe:
 if __name__ == '__main__':
     universe = Universe([VolumeIndicatorOBV], interval="5m")
 
-    print(universe.exchange_dfs["NYSE"])
-    print(len(universe.exchange_dfs["NYSE"]) + len(universe.exchange_dfs["NASDAQ"]) + len(universe.exchange_dfs["AMEX"]))
-    pd.set_option("display.max_rows", None, "display.max_columns", None)
+    # print(len(universe.exchange_dfs["NYSE"]) + len(universe.exchange_dfs["NASDAQ"]) + len(universe.exchange_dfs["AMEX"]))
+    # pd.set_option("display.max_rows", None, "display.max_columns", None)
     print(universe.screener)
-
     # universe.back_test()
     # print(universe.win_rate)
 
