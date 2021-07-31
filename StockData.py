@@ -10,12 +10,47 @@ from Strategies import VolumeIndicatorOBV
 from ta.utils import dropna
 from os import listdir
 from os.path import isfile, join
+from bs4 import BeautifulSoup
 
 
 def data(ticker: str = "AAPL", period: str = "30d", interval: str = "15m"):
     df = yf.download(tickers=ticker, period=period, interval=interval)
     df.drop("Adj Close", axis=1, inplace=True)
     return df
+
+
+def high_short_interest_tickers() -> pd.DataFrame:
+    """
+
+    :return:
+    TODO: when screening for stocks, incorporate short interest as part of the parameters
+    URL: https://www.marketwatch.com/tools/screener/short-interest
+    """
+    url = "https://www.marketwatch.com/tools/screener/short-interest"
+    request = requests.get(url)
+
+    # a helper function that fixes the weird naming system that market watch has
+    def fix_symbol_name(name):
+        return name.split("  ")[0]
+
+    def fix_percent_shorted(percent):
+        return float(percent.strip("%")) / 100
+
+    df = pd.read_html(request.text)[0]
+    tickers = df["Symbol  Symbol"].rename("Symbol").apply(fix_symbol_name)
+    percent = df["Float Shorted (%)"].apply(fix_percent_shorted)
+    df.drop(["Symbol  Symbol", "Float Shorted (%)"], inplace=True, axis=1)
+    df["Symbol"] = tickers
+    df["Float Shorted (%)"] = percent
+
+    return df
+
+
+def str_exist_in_column(series: pd.Series, string):
+    series = series.tolist()
+    if string not in series:
+        return False
+    return True
 
 
 class Universe:
@@ -27,7 +62,7 @@ class Universe:
 
     def __init__(self, strategies: list, exchanges: list = ("NYSE", "NASDAQ", "AMEX"), period="60d", interval="15m",
                  min_volume=100000, set_industry="", set_sector="Miscellaneous",
-                 set_country="United States", min_market_cap=1000000):
+                 set_country="United States", min_market_cap=1000000, min_short_percent=0.25):
         """
         :param strategies: a list of strategies (the strategies must inherent the strategy class)
         :param exchanges: can be NYSE, NASDAQ, or AMEX
@@ -38,6 +73,7 @@ class Universe:
         :param set_sector: the sector the ticker is in (please look below for a list)
         :param set_country: the country the screener is interested in (please look below for a list)
         :param min_market_cap: the minimum market cap
+        :param min_short_percent: the minimum percent of short interest (decimal format (0.05) or percent format (5%))
         """
         # by default, the stocks within this universe will be from the NYSE and NASDAQ exchanges
         self.strategies = strategies
@@ -51,6 +87,7 @@ class Universe:
         self._set_sector = set_sector
         self._set_country = set_country
         self._min_market_cap = min_market_cap
+        self._min_short_percent = min_short_percent
 
         # we will also be generating all of the dataframes for each ticker
         self.screener = self.__generate_screener()
@@ -65,8 +102,6 @@ class Universe:
         :param set_sector: the sector that we are interested in screening
         :param set_country: the country that the stock was founded in
         :return: a dict of tickers that meets all of the criteria
-        TODO: when screening for stocks, incorporate short interest as part of the parameters
-        URL: https://www.marketwatch.com/tools/screener/short-interest
         """
 
         # requests
@@ -88,12 +123,20 @@ class Universe:
         df["volume"] = volumes
         df["marketCap"] = market_caps
 
+        # these are the tickers we are interested base off preset parameters
         target_ticker = df[(df["volume"] >= self._min_volume) & (df["industry"] == self._set_industry)
                            & (df["marketCap"] >= self._min_market_cap) & (df["country"] == self._set_country)
                            & (df["industry"] == self._set_industry)]
+
+        # we also want to incorporate stocks on our screener that contains high short interest
+        # ['Symbol', 'Company Name', 'Price', 'Chg% (1D)', 'Chg% (YTD)', 'Short Interest', 'Short Date', 'Float', 'Float Shorted (%)']
+        high_shorts = high_short_interest_tickers()
+        high_shorts = high_shorts[high_shorts["Float Shorted (%)"] >= self._min_short_percent]
+        # print(high_shorts)
+        # print(target_ticker)
         return target_ticker.reset_index(drop=True)
 
-    def __generate_dataframes(self) -> pd.DataFrame:
+    def __generate_dataframes(self) -> dict:
         """
         The dataframes are separated into folders base off intervals. Each folder (interval) will contain dataframe
         files. The interval is base off the input when Universe is initialized.
@@ -126,12 +169,9 @@ class Universe:
                     for row in csv_reader:
                         ticker = row["Symbol"]
 
-                        # there was some problems with using the in keyword to determine whether the ticker exists in
-                        # the screener. Thus, we will be using this instead
-                        boolean_findings = self.screener.symbol.str.contains(ticker)
-                        total_occurrence = boolean_findings.sum()
                         # if the ticker does not exist within the screener
-                        if total_occurrence == 0:
+                        if not str_exist_in_column(self.screener.symbol, ticker):
+                            # we are not interested in this ticker
                             continue
 
                         if "/" in ticker:
@@ -145,12 +185,8 @@ class Universe:
                 else:
                     for row in csv_reader:
                         ticker = row["Symbol"]
-                        # there was some problems with using the in keyword to determine whether the ticker exists in
-                        # the screener. Thus, we will be using this instead
-                        boolean_findings = self.screener.symbol.str.contains(ticker)
-                        total_occurrence = boolean_findings.sum()
-                        # if the ticker does not exist within the screener
-                        if total_occurrence == 0:
+
+                        if not str_exist_in_column(self.screener.symbol, ticker):
                             continue
 
                         if "/" in ticker:
@@ -178,6 +214,7 @@ class Universe:
         for exchange, dfs in self.exchange_dfs.items():
             for df in dfs:
                 ticker = list(df.keys())[0]
+                print(ticker)
                 # print(f"The current ticker is: {ticker}")
                 df = df[ticker]
                 df = dropna(df)
@@ -430,7 +467,14 @@ class Universe:
 
 if __name__ == '__main__':
     universe = Universe([VolumeIndicatorOBV], interval="5m")
+
+    print(universe.exchange_dfs["NYSE"])
+    print(len(universe.exchange_dfs["NYSE"]) + len(universe.exchange_dfs["NASDAQ"]) + len(universe.exchange_dfs["AMEX"]))
+    pd.set_option("display.max_rows", None, "display.max_columns", None)
     print(universe.screener)
-    print(universe.exchange_dfs)
+
     # universe.back_test()
     # print(universe.win_rate)
+
+    # print(data.columns.tolist())
+    # print(data["Float Shorted (%)"])
